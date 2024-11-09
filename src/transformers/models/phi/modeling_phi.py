@@ -295,6 +295,7 @@ class PhiAttention(nn.Module):
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
@@ -356,6 +357,22 @@ class PhiAttention(nn.Module):
 
         if attention_mask is not None:
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+            
+            mas = None
+            if hasattr(attention_mask, 'MAS'):
+                mas = attention_mask.MAS
+            elif hasattr(self, 'MAS'):
+                mas = self.MAS
+            elif 'MAS' in kwargs:
+                mas = kwargs['MAS']
+            if mas is not None:
+                min_val = causal_mask.min()
+                bool_causal_mask = mas.get_mask_per_mod(causal_mask, attn_weights)
+                if bool_causal_mask.shape[-2] == 1:  # generation phase
+                    causal_mask = bool_causal_mask
+                else:
+                    causal_mask = (~bool_causal_mask).to(causal_mask.dtype)*min_val
+                    
             attn_weights += causal_mask
 
         # upcast attention to fp32
@@ -657,6 +674,9 @@ PHI_ATTENTION_CLASSES = {
 class PhiDecoderLayer(nn.Module):
     def __init__(self, config: PhiConfig, layer_idx: int):
         super().__init__()
+        print(f'#### _attn_implementation: {config._attn_implementation} ####')
+        config._attn_implementation = 'eager'
+        print(f'#### manualy changed to _attn_implementation: {config._attn_implementation} ####')
         self.self_attn = PHI_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx=layer_idx)
         self.mlp = PhiMLP(config)
         self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -714,6 +734,7 @@ class PhiDecoderLayer(nn.Module):
             use_cache=use_cache,
             cache_position=cache_position,
             position_embeddings=position_embeddings,
+            **kwargs,
         )
         attn_outputs = self.resid_dropout(attn_outputs)
 
@@ -901,6 +922,7 @@ class PhiModel(PhiPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        **kwargs,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -986,6 +1008,7 @@ class PhiModel(PhiPreTrainedModel):
                     use_cache=use_cache,
                     cache_position=cache_position,
                     position_embeddings=position_embeddings,
+                    **kwargs,
                 )
 
             hidden_states = layer_outputs[0]
@@ -1231,6 +1254,11 @@ class PhiForCausalLM(PhiPreTrainedModel, GenerationMixin):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        ####
+        kwargs = {}
+        if 'MAS' in loss_kwargs:
+            kwargs['MAS'] = loss_kwargs['MAS']
+        ####
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
             input_ids=input_ids,
@@ -1243,6 +1271,7 @@ class PhiForCausalLM(PhiPreTrainedModel, GenerationMixin):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
+            **kwargs,
         )
 
         hidden_states = outputs[0]
