@@ -196,6 +196,15 @@ class GPT2Attention(nn.Module):
             # if only "normal" attention layer implements causal mask
             query_length, key_length = query.size(-2), key.size(-2)
             causal_mask = self.bias[:, :, key_length - query_length : key_length, :key_length]
+            ############
+            mas = None
+            if hasattr(attention_mask, 'MAS'):
+                mas = attention_mask.MAS
+            elif hasattr(self, 'MAS'):
+                mas = self.MAS
+            if mas is not None:
+                causal_mask = mas.get_mask_per_mod(causal_mask, attn_weights)
+            ############
             mask_value = torch.finfo(attn_weights.dtype).min
             # Need to be a tensor, otherwise we get error: `RuntimeError: expected scalar type float but found double`.
             # Need to be on the same device, otherwise `RuntimeError: ..., x and y to be on the same device`
@@ -587,6 +596,9 @@ class GPT2Block(nn.Module):
         super().__init__()
         hidden_size = config.hidden_size
         inner_dim = config.n_inner if config.n_inner is not None else 4 * hidden_size
+        print(f'#### _attn_implementation: {config._attn_implementation} ####')
+        config._attn_implementation = 'eager'
+        print(f'#### manualy changed to _attn_implementation: {config._attn_implementation} ####')
         attention_class = GPT2_ATTENTION_CLASSES[config._attn_implementation]
 
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
@@ -996,6 +1008,11 @@ class GPT2Model(GPT2PreTrainedModel):
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
+        #####
+        MAS = None
+        if hasattr(attention_mask, 'MAS'):
+            MAS = attention_mask.MAS
+        #####
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -1033,6 +1050,10 @@ class GPT2Model(GPT2PreTrainedModel):
 
         # Attention mask.
         _use_sdpa = self._attn_implementation == "sdpa" and output_attentions is False and head_mask is None
+        #####
+        if hasattr(attention_mask, 'MAS'):
+            _use_sdpa = False
+        #####
         attention_mask = attention_mask.view(batch_size, -1) if attention_mask is not None else None
         if self._attn_implementation == "flash_attention_2":
             attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
@@ -1115,6 +1136,11 @@ class GPT2Model(GPT2PreTrainedModel):
                     head_mask = head_mask.to(hidden_states.device)
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
+            
+            #####
+            if MAS is not None:
+                attention_mask.MAS = MAS
+            #####
 
             if self.gradient_checkpointing and self.training:
                 outputs = self._gradient_checkpointing_func(
@@ -1259,6 +1285,7 @@ class GPT2LMHeadModel(GPT2PreTrainedModel, GenerationMixin):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithCrossAttentions]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
