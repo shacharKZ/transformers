@@ -357,7 +357,7 @@ class PhiAttention(nn.Module):
 
         if attention_mask is not None:
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-            
+            ###########
             mas = None
             if hasattr(attention_mask, 'MAS'):
                 mas = attention_mask.MAS
@@ -372,7 +372,7 @@ class PhiAttention(nn.Module):
                     causal_mask = bool_causal_mask
                 else:
                     causal_mask = (~bool_causal_mask).to(causal_mask.dtype)*min_val
-                    
+            ###########
             attn_weights += causal_mask
 
         # upcast attention to fp32
@@ -560,6 +560,7 @@ class PhiSdpaAttention(PhiAttention):
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # will become mandatory in v4.46
+        **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if output_attentions:
             # TODO: Improve this warning with e.g. `model.config.attn_implementation = "manual"` once this is implemented.
@@ -634,6 +635,23 @@ class PhiSdpaAttention(PhiAttention):
         causal_mask = attention_mask
         if attention_mask is not None:
             causal_mask = causal_mask[:, :, :, : key_states.shape[-2]]
+            ############
+            mas = None
+            if hasattr(attention_mask, 'MAS'):
+                mas = attention_mask.MAS
+            elif hasattr(self, 'MAS'):
+                mas = self.MAS
+            elif 'MAS' in kwargs:
+                mas = kwargs['MAS']
+            if mas is not None:
+                min_val = causal_mask.min()
+                bool_causal_mask = mas.get_mask_per_mod(causal_mask, None)
+                if bool_causal_mask.shape[-2] == 1:  # generation phase
+                    causal_mask = bool_causal_mask
+                else:
+                    causal_mask = (~bool_causal_mask).to(causal_mask.dtype)*min_val
+                    causal_mask = causal_mask.nan_to_num(0)  # TODO
+            ############
 
         # SDPA with memory-efficient backend is broken in torch==2.1.2 when using non-contiguous inputs and a custom
         # attn_mask, so we need to call `.contiguous()` here. This was fixed in torch==2.2.0.
@@ -675,7 +693,8 @@ class PhiDecoderLayer(nn.Module):
     def __init__(self, config: PhiConfig, layer_idx: int):
         super().__init__()
         print(f'#### _attn_implementation: {config._attn_implementation} ####')
-        config._attn_implementation = 'eager'
+        # config._attn_implementation = 'eager'
+        config._attn_implementation = 'sdpa'
         print(f'#### manualy changed to _attn_implementation: {config._attn_implementation} ####')
         self.self_attn = PHI_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx=layer_idx)
         self.mlp = PhiMLP(config)
@@ -922,7 +941,7 @@ class PhiModel(PhiPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        **kwargs,
+        **kwargs
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -1247,6 +1266,12 @@ class PhiForCausalLM(PhiPreTrainedModel, GenerationMixin):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         'This is an example script .\n\n\n\nfrom typing import List\n\ndef find_most_common_letter(words: List[str'
         ```"""
+        ####
+        kwargs = {}
+        if 'MAS' in loss_kwargs:
+            kwargs['MAS'] = loss_kwargs['MAS']
+            del loss_kwargs['MAS']
+        ####
 
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -1254,11 +1279,6 @@ class PhiForCausalLM(PhiPreTrainedModel, GenerationMixin):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        ####
-        kwargs = {}
-        if 'MAS' in loss_kwargs:
-            kwargs['MAS'] = loss_kwargs['MAS']
-        ####
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
             input_ids=input_ids,
