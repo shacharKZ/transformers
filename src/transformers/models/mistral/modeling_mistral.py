@@ -220,6 +220,7 @@ class MistralAttention(nn.Module):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
+        **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
 
@@ -246,6 +247,22 @@ class MistralAttention(nn.Module):
 
         if attention_mask is not None:  # no matter the length, we just slice it
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+            ############
+            mas = None
+            if hasattr(attention_mask, 'MAS'):
+                mas = attention_mask.MAS
+            elif hasattr(self, 'MAS'):
+                mas = self.MAS
+            elif 'MAS' in kwargs:
+                mas = kwargs['MAS']
+            if mas is not None:
+                min_val = causal_mask.min()
+                bool_causal_mask = mas.get_mask_per_mod(causal_mask, attn_weights)
+                if bool_causal_mask.shape[-2] == 1:  # generation phase
+                    causal_mask = bool_causal_mask
+                else:
+                    causal_mask = (~bool_causal_mask).to(causal_mask.dtype)*min_val
+            ############
             attn_weights = attn_weights + causal_mask
 
         # upcast attention to fp32
@@ -484,6 +501,10 @@ class MistralDecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
 
+        print(f'#### _attn_implementation: {config._attn_implementation} ####')
+        config._attn_implementation = 'eager'
+        print(f'#### manualy changed to _attn_implementation: {config._attn_implementation} ####')
+
         self.self_attn = MISTRAL_ATTENTION_CLASSES[config._attn_implementation](config=config, layer_idx=layer_idx)
 
         self.mlp = MistralMLP(config)
@@ -720,6 +741,7 @@ class MistralModel(MistralPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        **kwargs,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -800,6 +822,7 @@ class MistralModel(MistralPreTrainedModel):
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
+                    **kwargs,
                 )
 
             hidden_states = layer_outputs[0]
@@ -1027,6 +1050,7 @@ class MistralForCausalLM(MistralPreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         num_logits_to_keep: int = 0,
+        **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
@@ -1077,6 +1101,7 @@ class MistralForCausalLM(MistralPreTrainedModel, GenerationMixin):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
+            **kwargs,
         )
 
         hidden_states = outputs[0]
