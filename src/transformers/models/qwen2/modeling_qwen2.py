@@ -549,6 +549,23 @@ class Qwen2SdpaAttention(Qwen2Attention):
         causal_mask = attention_mask
         if attention_mask is not None:  # no matter the length, we just slice it
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
+            ############
+            mas = None
+            if hasattr(attention_mask, 'MAS'):
+                mas = attention_mask.MAS
+            elif hasattr(self, 'MAS'):
+                mas = self.MAS
+            elif 'MAS' in kwargs:
+                mas = kwargs['MAS']
+            if mas is not None:
+                min_val = causal_mask.min()
+                bool_causal_mask = mas.get_mask_per_mod(causal_mask, None)
+                if bool_causal_mask.shape[-2] == 1:  # generation phase
+                    causal_mask = bool_causal_mask
+                else:
+                    causal_mask = (~bool_causal_mask).to(causal_mask.dtype)*min_val
+                    causal_mask = causal_mask.nan_to_num(0)  # TODO
+            ############
 
         # SDPA with memory-efficient backend is currently (torch==2.1.2) bugged with non-contiguous inputs with custom attn_mask,
         # Reference: https://github.com/pytorch/pytorch/issues/112577.
@@ -592,8 +609,8 @@ class Qwen2DecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
 
         print(f'#### _attn_implementation: {config._attn_implementation} ####')
-        config._attn_implementation = 'eager'
-        # config._attn_implementation = 'sdpa'
+        # config._attn_implementation = 'eager'
+        config._attn_implementation = 'sdpa'
         print(f'#### manualy changed to _attn_implementation: {config._attn_implementation} ####')
 
         if config.sliding_window and config._attn_implementation != "flash_attention_2":
